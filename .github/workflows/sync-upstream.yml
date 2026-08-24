@@ -1,0 +1,72 @@
+name: 🔄 Sync Upstream & Auto Deploy
+
+on:
+  schedule:
+    # 每天北京时间 10:00 (UTC 02:00) 自动检查上游更新
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: 🔄 Sync Upstream
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.sync-upstream.outputs.changed }}
+      upstream_sha: ${{ steps.sync-upstream.outputs.upstream_sha }}
+      revision: ${{ steps.sync-upstream.outputs.revision }}
+
+    steps:
+      - name: 🚚 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: 🔀 Fetch & Merge Upstream
+        id: sync-upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 添加并拉取上游仓库
+          git remote add upstream https://github.com/maillab/cloud-mail.git 2>/dev/null || git remote set-url upstream https://github.com/maillab/cloud-mail.git
+          git fetch upstream main
+          upstream_sha="$(git rev-parse upstream/main)"
+
+          # 检查上游是否已经合并过
+          if git merge-base --is-ancestor "$upstream_sha" HEAD; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+            echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "✅ 本地仓库已是最新，无需同步 (Upstream: ${upstream_sha:0:7})"
+            exit 0
+          fi
+
+          echo "🚀 检测到上游新提交，开始合并..."
+          git merge upstream/main --no-edit || {
+            echo "❌ 与上游存在冲突，已停止自动合并，需手动处理。"
+            exit 1
+          }
+
+          git push origin main
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "✅ 上游代码同步完成并已推送到 main 分支。"
+
+  deploy:
+    name: 🚀 Trigger Cloudflare Deploy
+    needs: sync
+    if: ${{ needs.sync.outputs.changed == 'true' }}
+    uses: ./.github/workflows/deploy-cloudflare.yml
+    secrets: inherit
