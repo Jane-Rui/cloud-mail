@@ -1,3 +1,4 @@
+
 name: 🔄 Sync Upstream & Auto Deploy
 
 on:
@@ -18,9 +19,9 @@ jobs:
     name: 🔄 Sync Upstream
     runs-on: ubuntu-latest
     outputs:
-      changed: ${{ steps.sync-upstream.outputs.changed }}
-      upstream_sha: ${{ steps.sync-upstream.outputs.upstream_sha }}
-      revision: ${{ steps.sync-upstream.outputs.revision }}
+      changed: ${{ steps.sync-step.outputs.changed }}
+      upstream_sha: ${{ steps.sync-step.outputs.upstream_sha }}
+      revision: ${{ steps.sync-step.outputs.revision }}
 
     steps:
       - name: 🚚 Checkout Repository
@@ -29,40 +30,52 @@ jobs:
           fetch-depth: 0
           ref: main
 
-      - name: 🔀 Fetch & Merge Upstream
-        id: sync-upstream
+      - name: 🔀 Fetch & Sync Upstream Tree
+        id: sync-step
         shell: bash
         run: |
           set -euo pipefail
 
+          target_branch="main"
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # 添加并拉取上游仓库
+          # 1. 备份当前 Fork 仓库专属的工作流文件
+          mkdir -p /tmp/wf-backup
+          cp -a .github/workflows/. /tmp/wf-backup/
+
+          # 2. 拉取上游 maillab/cloud-mail 最新提交
           git remote add upstream https://github.com/maillab/cloud-mail.git 2>/dev/null || git remote set-url upstream https://github.com/maillab/cloud-mail.git
           git fetch upstream main
           upstream_sha="$(git rev-parse upstream/main)"
 
-          # 检查上游是否已经合并过
-          if git merge-base --is-ancestor "$upstream_sha" HEAD; then
+          # 3. 将工作区与暂存区完整更新为上游代码树 (同步业务代码)
+          git restore --source upstream/main --staged --worktree :/
+
+          # 4. 强制还原 Fork 仓库自身的工作流，杜绝上游 CI 污染和 GitHub 权限拦截
+          rm -rf .github/workflows
+          mkdir -p .github/workflows
+          cp -a /tmp/wf-backup/. .github/workflows/
+          git checkout HEAD -- .github/workflows
+
+          # 5. 检查业务代码是否有实质更新
+          git add -A
+          if git diff --cached --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
             echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-            echo "✅ 本地仓库已是最新，无需同步 (Upstream: ${upstream_sha:0:7})"
+            echo "✅ 本地业务代码已与上游最新版保持一致，无需提交 (Upstream: ${upstream_sha:0:7})"
             exit 0
           fi
 
-          echo "🚀 检测到上游新提交，开始合并..."
-          git merge upstream/main --no-edit || {
-            echo "❌ 与上游存在冲突，已停止自动合并，需手动处理。"
-            exit 1
-          }
-
-          git push origin main
+          # 6. 仅提交业务代码变更（不含任何 workflow 修改，git push 100% 成功）
+          git commit -m "chore: sync upstream ${upstream_sha:0:7}"
+          git push origin "HEAD:${target_branch}"
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
           echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "✅ 上游代码同步完成并已推送到 main 分支。"
+          echo "✅ 成功同步上游代码并推送到 main 分支。"
 
   deploy:
     name: 🚀 Trigger Cloudflare Deploy
